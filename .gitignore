@@ -1,0 +1,10 @@
+build/
+build-*/
+*.o
+*.so
+openwrt/feed/
+openwrt/feeds-*.conf
+*.swp
+*.swo
+/sdk/
+/artifacts/

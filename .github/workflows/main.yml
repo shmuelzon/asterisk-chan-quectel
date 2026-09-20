@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  release:
+    types: [ created ]
+  workflow_dispatch:
+
+env:
+  OPENWRT_VERSION: 25.12.5
+
+jobs:
+  # The PDU/charset code can be exercised without Asterisk or a modem, so run it
+  # on every change - it has already caught a null dereference that would
+  # otherwise only have shown up on the router.
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Asterisk headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y asterisk-dev
+
+      - name: Build and run the PDU harness
+        run: |
+          cat > /tmp/ast_stubs.c <<'EOF'
+          #include <stdio.h>
+          #include <stdarg.h>
+          #include <string.h>
+          #include <time.h>
+          #include <sys/time.h>
+          #include <asterisk/localtime.h>
+          void ast_log(int level, const char* file, int line, const char* func, const char* fmt, ...)
+          { (void)level;(void)file;(void)line;(void)func; va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
+          struct timeval ast_mktime(struct ast_tm* tm, const char* zone)
+          { (void)zone; struct tm t; memset(&t,0,sizeof t);
+            t.tm_year=tm->tm_year; t.tm_mon=tm->tm_mon; t.tm_mday=tm->tm_mday;
+            t.tm_hour=tm->tm_hour; t.tm_min=tm->tm_min; t.tm_sec=tm->tm_sec;
+            struct timeval tv = { .tv_sec = timegm(&t), .tv_usec = 0 }; return tv; }
+          struct ast_tm* ast_localtime(const struct timeval* tv, struct ast_tm* tm, const char* zone)
+          { (void)zone; struct tm t; time_t s = tv->tv_sec; gmtime_r(&s, &t);
+            memset(tm,0,sizeof(*tm)); tm->tm_year=t.tm_year; tm->tm_mon=t.tm_mon; tm->tm_mday=t.tm_mday;
+            tm->tm_hour=t.tm_hour; tm->tm_min=t.tm_min; tm->tm_sec=t.tm_sec; return tm; }
+          EOF
+          gcc -O1 -Wall -o pduharness \
+              test/pdu_harness.c src/pdu.c src/char_conv.c src/error.c /tmp/ast_stubs.c \
+              -I/usr/include -Isrc -D_GNU_SOURCE \
+              -DAST_MODULE_SELF_SYM=__x -DAST_MODULE='"t"' -DHAVE_LOCALE_T_IN_LOCALE_H
+          ./pduharness
+
+  build:
+    name: Package (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86-64
+            path: x86/64
+            arch: x86_64
+          - target: armsr-armv8
+            path: armsr/armv8
+            arch: aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # make-feed.sh derives the package version from the most recent tag
+          fetch-depth: 0
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev gawk \
+                                  git gettext libssl-dev xsltproc rsync wget unzip \
+                                  python3 zstd
+
+      # Saved at the end of the job, so this caches the SDK *after* asterisk and
+      # its dependency chain have been built - that is the expensive part, and
+      # it is why the key tracks only the OpenWrt version and target. Changes to
+      # this project therefore reuse the cache and rebuild just our own package.
+      - name: Cache the OpenWrt SDK
+        id: sdk-cache
+        uses: actions/cache@v6
+        with:
+          path: sdk
+          key: sdk-${{ env.OPENWRT_VERSION }}-${{ matrix.target }}
+
+      - name: Download the OpenWrt SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${{ matrix.path }}"
+          NAME=$(curl -sL "$BASE/" | grep -oE 'openwrt-sdk-[^"<]*\.tar\.zst' | sort -u | head -1)
+          test -n "$NAME"
+          echo "Using $NAME"
+          curl -sL -O "$BASE/$NAME"
+          tar --zstd -xf "$NAME"
+          rm "$NAME"
+          mv "${NAME%.tar.zst}" sdk
+
+      - name: Generate the package feed
+        run: ./openwrt/make-feed.sh
+
+      - name: Build the package
+        working-directory: sdk
+        run: |
+          # Only the feeds this package actually needs: base (libc, kernel),
+          # packages (alsa-lib) and telephony (asterisk). Pulling luci, routing
+          # and video as well clones ~140MB more for nothing.
+          grep -E '^src-git (--root=package base|packages|telephony) ' feeds.conf.default > feeds.conf
+          cat ../openwrt/feeds-quectel.conf >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install asterisk-chan-quectel
+          echo 'CONFIG_PACKAGE_asterisk-chan-quectel=m' >> .config
+          make defconfig
+          make package/asterisk-chan-quectel/compile -j$(nproc)
+
+      - name: Collect the package
+        run: |
+          # OpenWrt distinguishes architectures by directory, not filename, so
+          # every target builds an identically named .apk. A GitHub release is a
+          # flat list - without the architecture in the name the two builds
+          # collide on upload and nobody can tell which one to download.
+          mkdir -p artifacts
+          for f in $(find sdk/bin/packages -name 'asterisk-chan-quectel*.apk'); do
+            base=$(basename "$f" .apk)
+            cp "$f" "artifacts/${base}_${{ matrix.arch }}.apk"
+          done
+          ls -l artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: asterisk-chan-quectel-${{ matrix.arch }}
+          path: artifacts/*.apk
+          compression-level: 0
+
+      - name: Attach to release
+        if: github.event_name == 'release' && github.event.action == 'created'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload --clobber ${GITHUB_REF#refs/tags/} artifacts/*.apk
