@@ -136,8 +136,8 @@ cmake --build build-owrt -j
 ./openwrt/make-feed.sh                    # writes openwrt/feed/ + feeds-quectel.conf
 ```
 
-Then, from an extracted SDK matching your target (for OpenWrt 25.12.5 x86/64,
-`openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst`):
+Then, from an extracted SDK matching your target (for OpenWrt 25.12.6 x86/64,
+`openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst`):
 
 ```sh
 cp <project>/openwrt/feeds-quectel.conf .
