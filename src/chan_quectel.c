@@ -509,7 +509,14 @@ static void quectel_urc(void* userdata, const char* line)
 
     if (!strncmp(line, "+CLIP:", 6)) {
         parse_clip(pvt, line);
-        if (pvt->call_state == QUECTEL_CALL_IDLE && !pvt->owner) {
+        /*
+         * RING precedes +CLIP and has already moved us to INCOMING, so accept
+         * either state here - requiring IDLE meant no incoming call was ever
+         * offered to the dialplan. The modem repeats RING/+CLIP every few
+         * seconds while the call rings; pvt->owner keeps those repeats from
+         * starting a second channel.
+         */
+        if ((pvt->call_state == QUECTEL_CALL_IDLE || pvt->call_state == QUECTEL_CALL_INCOMING) && !pvt->owner) {
             quectel_handle_incoming(pvt);
         }
     } else if (!strcmp(line, "RING")) {
