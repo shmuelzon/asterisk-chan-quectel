@@ -22,7 +22,7 @@ A clear and concise description of what you expected to happen.
 
 **Environment**
  - Modem model and firmware: [`quectel show device <device>` reports both]
- - OpenWrt version: [e.g. 25.12.5]
+ - OpenWrt version: [e.g. 25.12.6]
  - Asterisk version: [e.g. 23.1.0]
  - chan_quectel version: [`quectel show version`]
 

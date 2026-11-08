@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  OPENWRT_VERSION: 25.12.5
+  OPENWRT_VERSION: 25.12.6
 
 jobs:
   # The PDU/charset code can be exercised without Asterisk or a modem, so run it
